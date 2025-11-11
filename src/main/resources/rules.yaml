@@ -1,0 +1,15 @@
+rate-limiter:
+  rules:
+    - id: user_rule_1
+      type: USER_ID
+      identifier: "12345"
+      algorithm: FIXED_WINDOW
+      limit: 3
+      windowSeconds: 10
+
+    - id: ip_rule_1
+      type: IP
+      identifier: "192.168.1.10"
+      algorithm: TOKEN_BUCKET
+      limit: 10
+      windowSeconds: 60  #time to refill bucket fully
