@@ -1,11 +1,16 @@
 package com.example.rateLimiter.util;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -59,6 +64,26 @@ public class RedisUtil {
     public long getTTL(String key) {
         Long ttl = redisTemplate.getExpire(key);
         return ttl != null ? ttl : 0L;
+    }
+
+    /**
+     * Executes a Lua script atomically and returns {count, ttl} or {allowed, tokens}
+     */
+    public long[] executeLuaScript(RedisScript<List> script, String key, Object... args) {
+        String[] stringArgs = Arrays.stream(args)
+                                    .map(String::valueOf)
+                                    .toArray(String[]::new);
+
+        List<Object> result = redisTemplate.execute(
+                script,
+                List.of(key),
+                stringArgs
+        );
+
+        return new long[]{
+                Long.parseLong(result.get(0).toString()),
+                Long.parseLong(result.get(1).toString())
+        };
     }
 
 }

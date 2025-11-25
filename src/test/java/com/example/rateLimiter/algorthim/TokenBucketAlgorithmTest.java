@@ -1,95 +1,99 @@
 package com.example.rateLimiter.algorthim;
 
 import java.time.Instant;
+import java.util.List;
 
-import com.example.rateLimiter.model.AlgorithmType;
 import com.example.rateLimiter.model.RateLimitResult;
 import com.example.rateLimiter.model.RateLimitRule;
-import com.example.rateLimiter.model.TokenBucketState;
-import com.example.rateLimiter.repo.TokenBucketRepository;
 import com.example.rateLimiter.util.RedisUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.core.script.RedisScript;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
-public class TokenBucketAlgorithmTest {
+class TokenBucketAlgorithmTest {
 
     private RedisUtil redisUtil;
-    private TokenBucketRepository tokenBucketRepository;
     private TokenBucketAlgorithm algorithm;
     private RateLimitRule rule;
-    private String key;
+    private RedisScript<List> tokenBucketScript;
 
     @BeforeEach
     void setUp() {
         redisUtil = mock(RedisUtil.class);
-        tokenBucketRepository = mock(TokenBucketRepository.class);
-        algorithm = new TokenBucketAlgorithm(redisUtil,tokenBucketRepository);
-        key = "user:123";
+        tokenBucketScript = mock(RedisScript.class);
+        algorithm = new TokenBucketAlgorithm(redisUtil, tokenBucketScript);
 
         rule = new RateLimitRule();
-        rule.setAlgorithm(AlgorithmType.TOKEN_BUCKET);
         rule.setId("user_rule");
         rule.setLimit(10);
         rule.setWindowSeconds(60);
     }
 
     @Test
-    void testAllowRequest_WhenTokensAvailable() {
+    void shouldAllowUntilTokensExhausted_thenBlock() {
+        String key = "rate_limit:USER_ID:TOKEN_BUCKET:12345";
 
-        // bucket currently full (10 tokens)
-        TokenBucketState state = new TokenBucketState(10, Instant.now().getEpochSecond());
-        when(tokenBucketRepository.load(anyString(), anyLong(), anyLong())).thenReturn(state);
+        when(redisUtil.executeLuaScript(eq(tokenBucketScript), eq(key), anyLong(), anyDouble(), anyLong(), anyLong()))
+                .thenReturn(new long[]{1, 9})   // first call - allowed, 9 remaining
+                .thenReturn(new long[]{1, 8})   // second call - allowed, 8 remaining
+                .thenReturn(new long[]{1, 7})   // third call - allowed, 7 remaining
+                .thenReturn(new long[]{1, 6})   // fourth call - allowed, 6 remaining
+                .thenReturn(new long[]{1, 5})   // fifth call - allowed, 5 remaining
+                .thenReturn(new long[]{1, 4})   // sixth call - allowed, 4 remaining
+                .thenReturn(new long[]{1, 3})   // seventh call - allowed, 3 remaining
+                .thenReturn(new long[]{1, 2})   // eighth call - allowed, 2 remaining
+                .thenReturn(new long[]{1, 1})   // ninth call - allowed, 1 remaining
+                .thenReturn(new long[]{1, 0})   // tenth call - allowed, 0 remaining
+                .thenReturn(new long[]{0, 0});  // eleventh call - blocked
 
-        RateLimitResult result = algorithm.allowRequest(key, rule);
+        for (int i = 0; i < 10; i++) {
+            RateLimitResult result = algorithm.allowRequest(key, rule);
+            assertTrue(result.isAllowed(), "Request " + (i + 1) + " should be allowed");
+            assertEquals(9 - i, result.getRemaining());
+            assertEquals(0, result.getRetryAfterSeconds());
+        }
 
-        assertTrue(result.isAllowed());
-        assertEquals(9, result.getRemaining());
-        assertEquals(0, result.getRetryAfterSeconds());
-        verify(tokenBucketRepository, times(1)).save(eq(key), any(), anyLong());
-        verify(tokenBucketRepository, times(1)).load(eq(key), anyLong(), anyLong());
+        RateLimitResult blocked = algorithm.allowRequest(key, rule);
+        assertFalse(blocked.isAllowed());
+        assertEquals(0, blocked.getRemaining());
+        assertTrue(blocked.getRetryAfterSeconds() > 0);
+
+        verify(redisUtil, times(11)).executeLuaScript(eq(tokenBucketScript), eq(key), anyLong(), anyDouble(), anyLong(), anyLong());
     }
-    @Test
-    void testAllowRequest_WhenNoTokensLeft() {
 
-        // bucket empty
-        TokenBucketState state = new TokenBucketState(0, Instant.now().getEpochSecond());
-        when(tokenBucketRepository.load(anyString(), anyLong(), anyLong())).thenReturn(state);
+    @Test
+    void shouldBlockWhenNoTokensAvailable() {
+        String key = "rate_limit:USER_ID:TOKEN_BUCKET:12345";
+
+        when(redisUtil.executeLuaScript(eq(tokenBucketScript), eq(key), anyLong(), anyDouble(), anyLong(), anyLong()))
+                .thenReturn(new long[]{0, 0});
 
         RateLimitResult result = algorithm.allowRequest(key, rule);
 
         assertFalse(result.isAllowed());
         assertEquals(0, result.getRemaining());
-        assertEquals(result.getRetryAfterSeconds(), 6);
-        verify(tokenBucketRepository, times(1)).save(eq(key), any(), anyLong());
-        verify(tokenBucketRepository, times(1)).load(eq(key), anyLong(), anyLong());
+        assertTrue(result.getRetryAfterSeconds() > 0);
+
+        verify(redisUtil, times(1)).executeLuaScript(eq(tokenBucketScript), eq(key), anyLong(), anyDouble(), anyLong(), anyLong());
     }
 
     @Test
-    void testRefillTokensAfterElapsedTime() {
+    void shouldRefillTokensAfterElapsedTime() {
+        String key = "rate_limit:USER_ID:TOKEN_BUCKET:12345";
 
-        // last refill was 30 seconds ago, only 5 tokens left
-        long thirtySecondsAgo = Instant.now().getEpochSecond() - 30;
-        TokenBucketState state = new TokenBucketState(5, thirtySecondsAgo);
-        when(tokenBucketRepository.load(anyString(), anyLong(), anyLong())).thenReturn(state);
+        when(redisUtil.executeLuaScript(eq(tokenBucketScript), eq(key), anyLong(), anyDouble(), anyLong(), anyLong()))
+                .thenReturn(new long[]{1, 7});  // tokens refilled after elapsed time, allowed with 7 remaining
 
         RateLimitResult result = algorithm.allowRequest(key, rule);
 
         assertTrue(result.isAllowed());
-        assertTrue(result.getRemaining() >= 5); // should be refilled a bit
-        verify(tokenBucketRepository, times(1)).save(eq(key), any(), anyLong());
-        verify(tokenBucketRepository, times(1)).load(eq(key), anyLong(), anyLong());
-    }
+        assertTrue(result.getRemaining() >= 5);
+        assertEquals(0, result.getRetryAfterSeconds());
 
+        verify(redisUtil, times(1)).executeLuaScript(eq(tokenBucketScript), eq(key), anyLong(), anyDouble(), anyLong(), anyLong());
+    }
 }

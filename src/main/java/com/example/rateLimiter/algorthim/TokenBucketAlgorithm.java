@@ -2,16 +2,17 @@ package com.example.rateLimiter.algorthim;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import com.example.rateLimiter.model.RateLimitResult;
 import com.example.rateLimiter.model.RateLimitRule;
 import com.example.rateLimiter.model.TokenBucketState;
-import com.example.rateLimiter.repo.TokenBucketRepository;
 import com.example.rateLimiter.util.RedisUtil;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 @Component("TOKEN_BUCKET")
@@ -19,7 +20,9 @@ import org.springframework.stereotype.Component;
 public class TokenBucketAlgorithm implements RateLimitAlgorithm {
 
     private final RedisUtil redisUtil;
-    private final TokenBucketRepository repository;
+//    private final TokenBucketRepository repository;
+
+    private final RedisScript<List> tokenBucketScript;
     @Override
     public RateLimitResult allowRequest(String key, RateLimitRule rule) {
         long capacity = rule.getLimit();                   // max tokens
@@ -27,44 +30,24 @@ public class TokenBucketAlgorithm implements RateLimitAlgorithm {
         double refillRate = (double) capacity / windowSeconds; // tokens per second
 
         long now =  Instant.now().toEpochMilli();       // current time in milliseconds
+        long ttl = windowSeconds * 2; // TTL for bucket key
 
-        // 1. Get current bucket state
-        TokenBucketState state = repository.load(
-                key,           // Redis key
-                capacity,      // default tokens
-                now / 1000 // default lastRefill in seconds
-        );
-        long lastRefillMillis = state.getLastRefillTimestamp() * 1000; // convert seconds → ms
-
-
-        // 2. Refill tokens based on elapsed time
-        long elapsedMillis = now - lastRefillMillis;
-        double tokensToAdd = (elapsedMillis / 1000.0) * refillRate; // convert ms → seconds
-        double newTokenCount = Math.min(capacity, state.getTokens() + tokensToAdd); // cap tokens to bucket capacity
-
-        // 3. Consume a token if available
-        boolean allowed = newTokenCount >= 1;
-        if (allowed) {
-            newTokenCount -= 1;
-        }
-
-        // 4. Update Redis
-        long newLastRefillSeconds = now / 1000;
-        repository.save(
+        long[] result = redisUtil.executeLuaScript(
+                tokenBucketScript,
                 key,
-                new TokenBucketState(newTokenCount, newLastRefillSeconds ), // store timestamp in seconds
-                windowSeconds * 2 // TTL in seconds
+                capacity,        // ARGV[1]
+                refillRate,      // ARGV[2]
+                now,             // ARGV[3]
+                ttl              // ARGV[4]
         );
 
         // 5. Compute reset info
-        long retryAfterSeconds = 0;
-        long resetTimestamp = now; // default to now if allowed
-        if (!allowed) {
-            retryAfterSeconds = (long) Math.ceil(1 / refillRate);
-            resetTimestamp = now + retryAfterSeconds;
-        }
+        boolean allowed = result[0] == 1;
+        long remaining = result[1];
 
-        long remaining = (long) Math.floor(newTokenCount);
+        long retryAfterSeconds = allowed ? 0 : (long) Math.ceil(1 / refillRate);
+        long retryAfterMilliSeconds = retryAfterSeconds * 1000;
+        long resetTimestamp = now + (allowed ? 0 : retryAfterMilliSeconds);
 
         return new RateLimitResult(allowed, capacity, remaining, resetTimestamp, retryAfterSeconds);
     }
