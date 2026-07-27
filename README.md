@@ -9,8 +9,11 @@
 - Focuses on core logic and correctness, not concurrency.
 - Timestamps stored in seconds for persistence efficiency.
 
+## Phase 2: Atomic Redis operations via Lua scripts
+- Atomic Redis operations via Lua scripts.
+- Concurrency safety.
+
 ### Known Limitations
-- Not atomic under high concurrency (will be handled in Phase 2 with Lua scripts).
 - No distributed coordination across nodes yet.
 - Minimal error handling and monitoring.
 - Single-node Redis: no replication or failover.
@@ -18,11 +21,7 @@
 -Token bucket timestamps use Instant.now().toEpochMilli(), which can cause inconsistencies in distributed setups.
 
 ### Next Steps
-Phase 2 will add:
-- Atomic Redis operations via Lua scripts.
-- Concurrency safety.
+Phase 3 will add:
 - Metrics and logging.
-
-[Phase 1 BOE Summary](Back-of-the-envelope%20Estimation.md)
 
 
