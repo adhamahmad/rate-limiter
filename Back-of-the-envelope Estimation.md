@@ -1,53 +1,61 @@
-# Phase 1 Token Bucket BOE Summary
+# Phase 2 Token Bucket BOE Summary
 
 ## Assumptions
-- **Algorithm:** Token Bucket (stricter than Fixed Window)
-- **Redis per-key storage:** hash with fields `"tokens"` (float) + `"lastRefill"` (timestamp in seconds)
+
+- **Algorithm:** Token Bucket
+- **Redis per-key storage:** Hash with fields `"tokens"` (stored as millitokens) and `"lastRefill"` (timestamp in milliseconds)
 - **Key size:** ~20 bytes; Redis hash overhead: ~150 bytes
-- **Redis throughput:** 100,000 commands/sec (single-node estimate)
-- **Commands per request:** 2 (load + save)
-- **Latency per request:** ~2–5 ms
+- **Redis deployment:** Single-node Redis
+- **Rate limiting logic:** Executed atomically using a Redis Lua script
+- **Commands per request:** 1 (Lua script execution)
+- **Latency per request:** ~1–3 ms (typical on a local network)
 
 ---
 
 ## Memory Estimation
+
 - **Memory per key:** ~200 bytes
 
 **Example scaling:**
 
 | Active keys | Memory required |
-|------------|----------------|
-| 10,000     | ~2 MB          |
-| 100,000    | ~20 MB         |
-| 1,000,000  | ~200 MB        |
+|-------------|----------------:|
+| 10,000      | ~2 MB |
+| 100,000     | ~20 MB |
+| 1,000,000   | ~200 MB |
 
-> Memory footprint is modest even at high scale.
+> Memory footprint remains modest even at high scale.
 
 ---
 
 ## Throughput / Concurrent Requests
-- **Max requests/sec:** Redis commands/sec ÷ commands per request = 100,000 ÷ 2 = 50,000 requests/sec
-- **Memory limit:** ~5 million active users, but throughput limits simultaneous requests:
-  - 50,000 users sending 1 request/sec  
-  - 250,000 users sending 1 request every 5 sec
+
+- Each request executes a single Lua script, reducing network overhead while ensuring atomic execution.
+- Actual throughput depends on Redis CPU capacity, Lua script execution time, network latency, and hardware.
+- Benchmarking is required to determine the maximum sustainable requests per second for a given deployment.
 
 ---
 
 ## Latency
-- Each request requires 2 Redis round-trips → ~2–5 ms per request depending on network and Redis location.
+
+- Each request requires a single Redis round trip, with the complete rate limiting operation executed atomically inside Redis.
+- Typical latency is approximately **1–3 ms**, depending on network conditions and Redis deployment.
 
 ---
 
 ## Limitations / Assumptions
-- Rules loaded in memory: require restart to update; not synchronized across nodes  
-- Timestamps use `Instant.now().toEpochMilli()`: may cause inconsistencies in distributed setups  
-- Single-node Redis; no replication or failover  
-- `load → compute → save` is non-atomic; race conditions possible under high concurrency
+
+- Single-node Redis; no replication, clustering, or failover.
+- Rules are loaded in application memory and require a restart to update.
+- Current time is supplied by the application (`Instant.now().toEpochMilli()`), so clock skew between application instances may affect distributed deployments.
+- Limited observability (no metrics, tracing, or monitoring dashboards).
 
 ---
 
-## Scaling Considerations (Optional for Discussion)
-- Use Lua scripts to make token updates atomic  
-- Shard keys across multiple Redis instances for higher throughput  
-- Centralize rules/config for dynamic updates across nodes  
-- Consider Redis clustering or multi-region setups for high availability
+## Scaling Considerations
+
+- Redis Cluster or sharding for horizontal scalability.
+- Dynamic rule management shared across application instances.
+- Metrics and monitoring (Micrometer, Prometheus, Grafana).
+- High availability through Redis replication and failover.
+- Additional rate limiting algorithms such as Sliding Window and Leaky Bucket.
